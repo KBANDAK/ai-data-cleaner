@@ -1,0 +1,7 @@
+dask[dataframe]
+pandas
+requests
+gradio
+plotly
+scikit-learn
+pdfplumber
