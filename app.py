@@ -1,17 +1,17 @@
-import dask.dataframe as dd
-import pandas as pd
-import requests
-import gradio as gr
-import plotly.express as px
-from pathlib import Path
-import tempfile
 import os
 import io
-import pdfplumber 
+import tempfile
+from pathlib import Path
 
+import requests
+import pandas as pd
+import dask.dataframe as dd
+import gradio as gr
+import plotly.express as px
+import pdfplumber
 from sklearn.impute import KNNImputer
 
-class OmniDataPipeline:
+class DataPipeline:
     def __init__(self, missing_threshold=0.3):
         self.missing_threshold = missing_threshold
 
@@ -22,24 +22,30 @@ class OmniDataPipeline:
                 response = requests.get(source_str)
                 response.raise_for_status()
                 try:
-                    pdf = pd.DataFrame(response.json())
-                except:
-                    pdf = pd.read_csv(io.StringIO(response.text))
-                return dd.from_pandas(pdf, npartitions=1)
+                    df = pd.DataFrame(response.json())
+                except ValueError:
+                    df = pd.read_csv(io.StringIO(response.text))
+                return dd.from_pandas(df, npartitions=1)
             except Exception:
                 return None
-                
+
         path = Path(source)
         ext = path.suffix.lower()
+        
         try:
-            if ext == '.csv': return dd.read_csv(path, assume_missing=True)
-            elif ext == '.parquet': return dd.read_parquet(path)
-            elif ext in ['.xls', '.xlsx']: return dd.from_pandas(pd.read_excel(path), npartitions=1)
-            elif ext == '.json': return dd.from_pandas(pd.read_json(path), npartitions=1)
-            elif ext == '.xml': return dd.from_pandas(pd.read_xml(path), npartitions=1)
-            elif ext in ['.html', '.htm']: return dd.from_pandas(pd.read_html(path)[0], npartitions=1)
-            
-            elif ext == '.pdf': 
+            if ext == '.csv':
+                return dd.read_csv(path, assume_missing=True)
+            elif ext == '.parquet':
+                return dd.read_parquet(path)
+            elif ext in ['.xls', '.xlsx']:
+                return dd.from_pandas(pd.read_excel(path), npartitions=1)
+            elif ext == '.json':
+                return dd.from_pandas(pd.read_json(path), npartitions=1)
+            elif ext == '.xml':
+                return dd.from_pandas(pd.read_xml(path), npartitions=1)
+            elif ext in ['.html', '.htm']:
+                return dd.from_pandas(pd.read_html(path)[0], npartitions=1)
+            elif ext == '.pdf':
                 all_tables = []
                 with pdfplumber.open(path) as pdf:
                     for page in pdf.pages:
@@ -59,21 +65,21 @@ class OmniDataPipeline:
                             if text:
                                 lines = [line.strip() for line in text.split('\n') if line.strip()]
                                 all_text_lines.extend(lines)
-                                
+                    
                     if all_text_lines:
                         pdf_df = pd.DataFrame(all_text_lines, columns=["unstructured_text"])
                         return dd.from_pandas(pdf_df, npartitions=1)
-                    else:
-                        return None 
-            else: return None
+                    return None
+            return None
         except Exception:
             return None
 
     def profile(self, ddf):
-        if ddf is None: return {"error": "No data"}
+        if ddf is None:
+            return {"error": "No data"}
+        
         total_rows = ddf.shape[0].compute()
         missing_counts = ddf.isnull().sum().compute()
-        
         ddf_unique = ddf.drop_duplicates()
         unique_rows = ddf_unique.shape[0].compute()
         
@@ -85,62 +91,62 @@ class OmniDataPipeline:
         }
 
     def validate(self, profile_report):
-        if "error" in profile_report: return False, ["Failed to load."]
+        if "error" in profile_report:
+            return False, ["Failed to load data."]
+        
         issues = []
         if profile_report.get("duplicates", 0) > 0:
             issues.append(f"Found {profile_report['duplicates']} duplicate rows.")
+            
         for col, pct in profile_report["missing_pct"].items():
             if pct > self.missing_threshold:
-                issues.append(f"Column '{col}' exceeds threshold ({pct*100:.1f}% missing).")
+                issues.append(f"Column '{col}' exceeds missing threshold ({pct*100:.1f}%).")
+                
         return len(issues) == 0, issues
 
     def clean(self, ddf, profile_report):
-        action_log = [] 
+        action_log = []
         
         if profile_report.get("duplicates", 0) > 0:
             ddf = ddf.drop_duplicates()
-            action_log.append(f"🗑️ Dropped {profile_report['duplicates']} exact duplicate rows.")
+            action_log.append(f"Dropped {profile_report['duplicates']} duplicate rows.")
             
         df_clean = ddf.compute()
         knn_model = KNNImputer(n_neighbors=5, weights="distance")
         
         for col, dtype in profile_report.get("dtypes", {}).items():
-            if profile_report["missing_pct"].get(col, 0) == 0: 
-                continue 
+            if profile_report["missing_pct"].get(col, 0) == 0:
+                continue
             
             if 'int' in dtype or 'float' in dtype:
                 numeric_cols = df_clean.select_dtypes(include=['number']).columns
                 df_clean[numeric_cols] = knn_model.fit_transform(df_clean[numeric_cols])
-                action_log.append(f"🤖 Used AI (K-Nearest Neighbors) to predict and fill missing values in '{col}'.")
-                
+                action_log.append(f"Imputed missing values in '{col}' using KNN.")
             elif 'object' in dtype or 'string' in dtype:
-                df_clean[col] = df_clean[col].fillna("UNKNOWN_RECORD")
-                action_log.append(f"📝 Replaced missing text in '{col}' with 'UNKNOWN_RECORD'")
+                df_clean[col] = df_clean[col].fillna("UNKNOWN")
+                action_log.append(f"Filled missing text in '{col}' with 'UNKNOWN'.")
                 
         if not action_log:
-            action_log.append("✨ No cleaning actions were required.")
+            action_log.append("No cleaning actions were required.")
             
-        # Reset the index on the cleaned dataframe too before returning
         return dd.from_pandas(df_clean.reset_index(drop=True), npartitions=1), action_log
 
-
 def process_data(file_input, url_input):
-    pipeline = OmniDataPipeline(missing_threshold=0.3)
+    pipeline = DataPipeline(missing_threshold=0.3)
+    source = url_input if url_input.strip() else (file_input.name if file_input else None)
     
-    source = url_input if url_input.strip() != "" else (file_input.name if file_input else None)
     if not source:
-        return {"error": "No input"}, "❌ Upload a file OR paste a link.", 0, 0, None, "No data provided.", None, None, None
+        return {"error": "No input"}, "Upload a file or paste a link.", 0, 0, None, "No data provided.", None, None, None
 
     ddf = pipeline.ingest(source)
-    if ddf is None: 
-        return {"error": "Bad source"}, "❌ Ingestion Failed. Could not parse tables or text from file.", 0, 0, None, "Ingestion Failed.", None, None, None
+    if ddf is None:
+        return {"error": "Bad source"}, "Ingestion failed.", 0, 0, None, "Ingestion failed.", None, None, None
         
-    # --- BUG FIX 2.0: TRULY RESOLVE DUPLICATE COLUMN NAMES ---
     cols = list(ddf.columns)
     seen = {}
     new_cols = []
     for c in cols:
-        c_str = str(c) if pd.notna(c) and str(c).strip() != "" else "Unnamed"
+        c_str = str(c) if pd.notna(c) and str(c).strip() else "Unnamed"
         if c_str in seen:
             seen[c_str] += 1
             new_cols.append(f"{c_str}_{seen[c_str]}")
@@ -148,33 +154,30 @@ def process_data(file_input, url_input):
             seen[c_str] = 0
             new_cols.append(c_str)
             
-    # Reassign columns directly (bypasses dictionary overwrites)
     ddf.columns = new_cols
-    # ---------------------------------------------------------
 
     report = pipeline.profile(ddf)
     total_rows = report.get("total_rows", 0)
     dupe_count = report.get("duplicates", 0)
-    
     missing_dict = report.get("missing_pct", {})
     total_missing = sum(missing_dict.values())
     
     if total_missing > 0:
         fig = px.bar(
-            x=list(missing_dict.keys()), 
+            x=list(missing_dict.keys()),
             y=[v * 100 for v in missing_dict.values()],
             labels={'x': 'Columns', 'y': '% Missing Data'},
-            title="🚨 Data Quality Error Map",
+            title="Missing Data Percentage by Column",
             color_discrete_sequence=['#ff4b4b']
         )
     else:
         fig = px.bar(
-            x=["All Columns"], y=[0], 
-            title="✅ Perfect Data - No Missing Values Detected", 
+            x=["All Columns"], 
+            y=[0],
+            title="No Missing Values Detected",
             color_discrete_sequence=['#00cc96']
         )
         
-    # --- BUG FIX 3: RESET INDEX TO AVOID DUPLICATE ROW NUMBERS ---
     raw_preview = ddf.head(50).reset_index(drop=True)
     
     def highlight_errors(val):
@@ -188,58 +191,60 @@ def process_data(file_input, url_input):
     is_critical_pass, issues = pipeline.validate(report)
     
     if total_missing == 0 and dupe_count == 0:
-        status_msg = "✅ Perfect Dataset. No errors or duplicates found!"
+        status_msg = "Dataset is clean. No errors or duplicates found."
         ddf_final = ddf
-        audit_text = "✨ No cleaning actions were required."
+        audit_text = "No cleaning actions were required."
     else:
         if is_critical_pass:
-            status_msg = f"🧹 Minor issues found ({dupe_count} duplicates). AI auto-cleaning applied."
+            status_msg = f"Minor issues found ({dupe_count} duplicates). Auto-cleaning applied."
         else:
-            status_msg = f"⚠️ CRITICAL ISSUES: {'; '.join(issues)}. \n🤖 Deep AI auto-cleaning applied."
+            status_msg = f"Issues detected: {'; '.join(issues)}. Auto-cleaning applied."
             
         ddf_final, action_log = pipeline.clean(ddf, report)
         audit_text = "\n".join(action_log)
         
-    out_path = os.path.join(tempfile.gettempdir(), "ai_cleaned_omni_data.csv")
+    out_path = os.path.join(tempfile.gettempdir(), "cleaned_data.csv")
     ddf_final.to_csv(out_path, single_file=True, index=False)
     
     return report, status_msg, total_rows, dupe_count, fig, audit_text, styled_raw_df, ddf_final.head(50), out_path
 
-
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🤖 AI Data Profiler & Cleaner")
-    gr.Markdown("Uses Machine Learning (K-Nearest Neighbors) to intelligently predict and fill missing data.")
+    gr.Markdown("# Data Profiler and Cleaner")
+    gr.Markdown("Inspects datasets and uses K-Nearest Neighbors to impute missing values.")
     
     with gr.Row():
         with gr.Column(scale=1):
-            file_in = gr.File(label="Upload ANY File Type")
-            url_in = gr.Textbox(label="OR Paste a Web Link")
-            run_btn = gr.Button("🚀 Inspect & Clean with AI", variant="primary")
+            file_in = gr.File(label="Upload File")
+            url_in = gr.Textbox(label="Or Paste Web Link")
+            run_btn = gr.Button("Inspect & Clean", variant="primary")
             status_out = gr.Textbox(label="Pipeline Status", lines=2)
             
             with gr.Row():
                 rows_out = gr.Number(label="Total Rows Scanned", interactive=False)
-                dupes_out = gr.Number(label="Duplicates Found & Removed", interactive=False)
+                dupes_out = gr.Number(label="Duplicates Removed", interactive=False)
             
         with gr.Column(scale=1):
-            graph_out = gr.Plot(label="Error Visualization")
-            gr.Markdown("### 📋 AI Audit Log")
-            audit_out = gr.Textbox(label="Exactly what the AI did to your data:", lines=5, interactive=False)
+            graph_out = gr.Plot(label="Missing Data Visualization")
+            gr.Markdown("### Audit Log")
+            audit_out = gr.Textbox(label="Cleaning actions applied:", lines=5, interactive=False)
             
-    with gr.Accordion("Advanced JSON Report", open=False):
+    with gr.Accordion("Advanced Report", open=False):
         report_out = gr.JSON()
             
-    gr.Markdown("### 🔍 Before & After Comparison")
+    gr.Markdown("### Data Preview")
     with gr.Row():
-        raw_df_out = gr.Dataframe(label="🚨 DIRTY DATA (Errors in Red)", interactive=False)
-        clean_df_out = gr.Dataframe(label="✨ CLEAN DATA PREVIEW", interactive=False)
+        raw_df_out = gr.Dataframe(label="Raw Data", interactive=False)
+        clean_df_out = gr.Dataframe(label="Cleaned Data", interactive=False)
         
-    download_out = gr.File(label="📥 Download Cleaned CSV")
+    download_out = gr.File(label="Download Cleaned CSV")
 
     run_btn.click(
-        fn=process_data, 
-        inputs=[file_in, url_in], 
-        outputs=[report_out, status_out, rows_out, dupes_out, graph_out, audit_out, raw_df_out, clean_df_out, download_out]
+        fn=process_data,
+        inputs=[file_in, url_in],
+        outputs=[
+            report_out, status_out, rows_out, dupes_out, 
+            graph_out, audit_out, raw_df_out, clean_df_out, download_out
+        ]
     )
 
 if __name__ == "__main__":
